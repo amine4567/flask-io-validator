@@ -1,12 +1,12 @@
-class MissingTypeHintsError(Exception):
+class MissingTypeHintError(Exception):
     pass
 
 
-class ReservedKeywordsError(Exception):
+class ReservedKeywordError(Exception):
     pass
 
 
-class MissingParametersError(Exception):
+class MissingParameterError(Exception):
     pass
 
 

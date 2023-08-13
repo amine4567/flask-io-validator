@@ -5,18 +5,19 @@ from typing import Callable
 import pydantic
 from flask import request
 
-from .consts import RESERVED_KWARGS
+from .consts import REQUEST_ARGS_KWARG, REQUEST_BODY_PARAM, RESERVED_KWARGS
 from .exceptions import (
-    MissingParametersError,
-    MissingTypeHintsError,
+    MissingParameterError,
+    MissingTypeHintError,
     MissingURLVariableError,
-    ReservedKeywordsError,
+    ReservedKeywordError,
 )
 from .schemas import APICallError, ErrorType, StrictBaseModel
 
 
 def validate_url_vars(decorated_f: Callable) -> Callable:
-    """Decorator to apply on flask view functions to validate URL variables.
+    """Decorator to apply on flask view functions to validate an API's call URL
+    variables.
 
     Every parameter that is not a reserved keyword is considered an URL variable, there
     must be a one-to-one correspondence between the declared URL variables and the
@@ -51,7 +52,7 @@ def validate_url_vars(decorated_f: Callable) -> Callable:
         declared_url_vars = request.url_rule.arguments
         illegal_url_vars = declared_url_vars.intersection(RESERVED_KWARGS)
         if len(illegal_url_vars) != 0:
-            raise ReservedKeywordsError(
+            raise ReservedKeywordError(
                 f"{illegal_url_vars} are reserved keywords and cannot be used as URL "
                 "variables."
             )
@@ -60,7 +61,7 @@ def validate_url_vars(decorated_f: Callable) -> Callable:
             inspect.signature(decorated_f).parameters.keys()
         ) - set(RESERVED_KWARGS)
         if len(declared_url_vars - non_reserved_params) != 0:
-            raise MissingParametersError(
+            raise MissingParameterError(
                 f"{declared_url_vars - non_reserved_params} are declared as URL "
                 f"variables but are missing in {decorated_f}'s parameters."
             )
@@ -78,7 +79,7 @@ def validate_url_vars(decorated_f: Callable) -> Callable:
         }
         missing_annotations = declared_url_vars - set(annotated_params.keys())
         if len(missing_annotations) != 0:
-            raise MissingTypeHintsError(
+            raise MissingTypeHintError(
                 f"{missing_annotations} are declared as URL variables, exist in the "
                 f"{decorated_f}'s parameters but are missing annotations. Please add "
                 "type hints to these parameters."
@@ -108,3 +109,111 @@ def validate_url_vars(decorated_f: Callable) -> Callable:
         return decorated_f(*args, **new_kwargs)
 
     return transformed_f
+
+
+def validate_request_vals(
+    param_name: str, request_vals_getter: Callable[[], dict]
+) -> Callable:
+    def decorator(decorated_f: Callable) -> Callable:
+        @wraps(decorated_f)
+        def transformed_f(*args, **kwargs):
+            if param_name in inspect.signature(decorated_f).parameters:
+                try:
+                    Schema = decorated_f.__annotations__[param_name]
+                except KeyError:
+                    raise MissingTypeHintError(
+                        f"The '{param_name}' parameter not found in {decorated_f}'s "
+                        "annotations. Please add a type hint. "
+                    )
+
+                if not issubclass(Schema, pydantic.BaseModel):
+                    raise TypeError(
+                        f"The '{param_name}' parameter expected to be of type "
+                        f"{pydantic.BaseModel} but got {Schema}."
+                    )
+
+                try:
+                    request_vals = Schema(**request_vals_getter())
+                except pydantic.ValidationError as e:
+                    return (
+                        [
+                            APICallError(
+                                type=ErrorType.VALIDATION,
+                                subtype=error["type"],
+                                message=".".join(error["loc"]) + ": " + error["msg"],
+                            )
+                            for error in e.errors()
+                        ],
+                        400,
+                    )
+
+                new_kwargs = {**kwargs, param_name: request_vals}
+            else:
+                try:
+                    StrictBaseModel(**request_vals_getter())
+                except pydantic.ValidationError:
+                    return (
+                        APICallError(
+                            type=ErrorType.VALIDATION,
+                            message=f"{param_name} is expected to be empty but got "
+                            + str(request_vals_getter()),
+                        ),
+                        400,
+                    )
+
+                new_kwargs = kwargs
+
+            return decorated_f(*args, **new_kwargs)
+
+        return transformed_f
+
+    return decorator
+
+
+validate_request_body = validate_request_vals(
+    REQUEST_BODY_PARAM, lambda: request.get_json() or dict()
+)
+validate_request_body.__doc__ = """
+Decorator to apply on flask view functions to validate an API's call request body.
+
+Parameters
+----------
+decorated_f : Callable
+    Decorated function
+
+Returns
+-------
+Callable
+    Transformed function
+
+Raises
+------
+MissingTypeHintError
+    _description_
+TypeError
+    _description_
+"""
+
+validate_request_args = validate_request_vals(
+    REQUEST_ARGS_KWARG, lambda: dict(request.args)
+)
+validate_request_args.__doc__ = """
+Decorator to apply on flask view functions to validate an API's call request arguments.
+
+Parameters
+----------
+decorated_f : Callable
+    Decorated function
+
+Returns
+-------
+Callable
+    Transformed function
+
+Raises
+------
+MissingTypeHintError
+    _description_
+TypeError
+    _description_
+"""
